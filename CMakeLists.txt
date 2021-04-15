@@ -47,6 +47,9 @@ find_package(OpenCV REQUIRED HINTS /usr/local/lib)
 
 add_message_files(DIRECTORY msg FILES
   FrequencySet.msg
+  USM.msg
+  RecMsg.msg
+  DefaultMsg.msg
   )
 
 generate_messages(DEPENDENCIES
