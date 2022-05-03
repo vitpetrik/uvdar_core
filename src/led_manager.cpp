@@ -192,6 +192,13 @@ namespace uvdar {
             serial_msg.payload.push_back(b?0x01:0x00); //bit of the sequence
             /* ROS_INFO_STREAM("[UVDARLedManager]: b:" << (b?"1":"0")); */
           }
+          if (sequence_length < 14){
+            int stuffing = 14 - sequence_length;
+            for (int i=0; i < stuffing; i++){
+              serial_msg.payload.push_back(0x00); //bit of the sequence
+              /* ROS_INFO_STREAM("[UVDARLedManager]: b:" << (b?"1":"0")); */
+            }
+          }
 
           /* if (i == 3) */
           baca_protocol_publisher.publish(serial_msg);
