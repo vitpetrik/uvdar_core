@@ -11,6 +11,9 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 -g -Wall -Wextra")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -std=c++17 -g -Wall -Wextra -O3")
 # set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O0 -g -DNDEBUG -std=c++17 -g -Wall -Wextra")
 
+# add_compile_options(-fsanitize=address)
+# add_link_options(-fsanitize=address)
+
 find_package(catkin REQUIRED COMPONENTS
   roscpp
   nodelet
