@@ -213,10 +213,13 @@ bool HT4DBlinkerTracker::isCurrentBatchProcessed() {
 }
 
 int HT4DBlinkerTracker::getTrackerCount() {
-  return signals_.size();
+  /* return signals_.size(); */
+  return cignals_.size();
 }
-std::vector<bool> HT4DBlinkerTracker::getSignal(int index) {
-  return signals_[index];
+/* std::vector<bool> HT4DBlinkerTracker::getSignal(int index) { */
+std::vector<int> HT4DBlinkerTracker::getSignal(int index) {
+  /* return signals_[index]; */
+  return cignals_[index];
 }
 double HT4DBlinkerTracker::getYaw(int index) {
   return yaw_averages_[index];
@@ -275,17 +278,29 @@ std::vector< std::pair<cv::Point2d,int> > HT4DBlinkerTracker::getResults() {
   if (debug_)
     std::cout << "Orig. pt. count: " << origin_pts.size() << std::endl;
 
-  std::vector< cv::Point > houghOrigins = findHoughPeaks(expected_matches_);
+  int h_thr = 12;
+
+  std::vector< cv::Point > houghOrigins = findHoughPeaks(expected_matches_, h_thr);
   if (debug_){
     std::cout << "Hough peaks count: " << houghOrigins.size() <<  std::endl;
   }
   origin_pts.insert(origin_pts.end(), houghOrigins.begin(), houghOrigins.end());
   origin_pts_out.insert(origin_pts_out.end(), houghOrigins.begin(), houghOrigins.end());
+
+  while((int)origin_pts.size() < expected_matches_ && h_thr > 2){
+    h_thr = h_thr - 2;
+    houghOrigins = findHoughPeaks(expected_matches_, h_thr);
+
+    origin_pts.insert(origin_pts.end(), houghOrigins.begin(), houghOrigins.end());
+    origin_pts_out.insert(origin_pts_out.end(), houghOrigins.begin(), houghOrigins.end());
+  }
+  
   std::vector< std::pair<cv::Point2d,int> > result;
 
   pitch_averages_.clear();
   yaw_averages_.clear();
   signals_.clear();
+  cignals_.clear();
 
   if (debug_)
     std::cout << "Orig. pt. count: " << origin_pts.size() << std::endl;
@@ -293,11 +308,15 @@ std::vector< std::pair<cv::Point2d,int> > HT4DBlinkerTracker::getResults() {
     if (debug_)
       std::cout << "Curr. orig. pt: " << origin_pts[i] << std::endl;
     std::vector<bool> blink_signal;
-    int signal_id;
+    std::vector<int> signal_;
+    /* int signal_id; */
     double yawAvg, pitchAvg;
-    signal_id = retrieveSignalID(origin_pts[i], yawAvg, pitchAvg, blink_signal);
-    result.push_back(std::pair<cv::Point2d,int>(cv::Point2d(origin_pts_out[i].x, origin_pts_out[i].y), signal_id));
-    signals_.push_back(blink_signal);
+    signal_ = retrieveSignal(origin_pts[i], yawAvg, pitchAvg);
+    /* signal_id = retrieveSignalID(origin_pts[i], yawAvg, pitchAvg, blink_signal); */
+    /* result.push_back(std::pair<cv::Point2d,int>(cv::Point2d(origin_pts_out[i].x, origin_pts_out[i].y), signal_id)); */
+    result.push_back(std::pair<cv::Point2d,int>(cv::Point2d(origin_pts_out[i].x, origin_pts_out[i].y), 1));
+    /* signals_.push_back(blink_signal); */
+    cignals_.push_back(signal_);
 
   if (debug_){
     std::cout << "Retrieved signal: " << std::endl;
@@ -482,7 +501,7 @@ void HT4DBlinkerTracker::projectAccumulatorToHT() {
   return;
 }
 
-std::vector< cv::Point > HT4DBlinkerTracker::findHoughPeaks(int peak_count) {
+std::vector< cv::Point > HT4DBlinkerTracker::findHoughPeaks(int peak_count, int h_thr) {
   std::vector< cv::Point > peaks;
   int             curr_max;
   cv::Point       curr_max_pos;
@@ -500,10 +519,11 @@ std::vector< cv::Point > HT4DBlinkerTracker::findHoughPeaks(int peak_count) {
         store_current = true;
       }
     } }
-    if (hough_space_maxima_[index2d(curr_max_pos.x,curr_max_pos.y)] < hough_thresh_) { //stop if the highest remaining value is below threshold
+    /* if (hough_space_maxima_[index2d(curr_max_pos.x,curr_max_pos.y)] < hough_thresh_) { //stop if the highest remaining value is below threshold */
+    if (hough_space_maxima_[index2d(curr_max_pos.x,curr_max_pos.y)] < h_thr) { //stop if the highest remaining value is below threshold
       store_current = false;
       if (debug_)
-        std::cout << "Point " << curr_max_pos << " with value of " <<hough_space_maxima_[index2d(curr_max_pos.x,curr_max_pos.y)] <<" Failed threshold test. Threshold is " << hough_thresh_ << ". Breaking." << std::endl;
+        std::cout << "Point " << curr_max_pos << " with value of " <<hough_space_maxima_[index2d(curr_max_pos.x,curr_max_pos.y)] <<" Failed threshold test. Threshold is " << h_thr << ". Breaking." << std::endl;
       break;
     }
     /* if (!miniFast(curr_max_pos.x,curr_max_pos.y, hough_thresh_/4)) { //check if the position with the retrieved maximum is a concentrated peak */
@@ -574,6 +594,142 @@ cv::Point HT4DBlinkerTracker::findHoughPeakLocal(cv::Point expected_pos) {
     std::cout << "Finding for visible: Scaling factor: " << scaling_factor_ << " Thresh: " << hough_thresh_ << " Curr. Peak: " << hough_space_maxima_[index2d(curr_max_pos.x,curr_max_pos.y)] << std::endl;
   return curr_max_pos;
 }
+
+
+std::vector<int> HT4DBlinkerTracker::retrieveSignal(cv::Point origin_point, double &avg_yaw, double &avg_pitch) {
+  //get rough "image pitch" and "image yaw" based on the maxima index in the origin point X-Y cooridnate of the Hough space
+  unsigned char init_index = index_matrix_.at< unsigned char >(origin_point);
+  unsigned char pitch_index = getPitchIndex(init_index);
+  unsigned char yaw_index = getYawIndex(init_index);
+  if (debug_){
+    std::cout << "Initial pitch, yaw: estimate: [" << pitch_vals_[pitch_index]*(180/M_PI) <<  ", " <<  yaw_vals_[yaw_index]*(180/M_PI) << "] deg" << std::endl;
+  }
+  int                      step_count = std::min((int)(accumulator_local_copy_.size()), mem_steps_); //do not iterate over the accumulator futher than to the first inserted frame (for initial states when the number of inserted frames is less than mem_steps_)
+  double                   rad_expectec_max, rad_expected_min, yaw_expected, curr_point_radius, curr_point_yaw;
+  double avg_pitch_cot;
+  int curr_point_max_dim, curr_point_radius_round;
+  std::vector< cv::Point > positive_point_accum;
+  std::vector< cv::Point > positive_point_accum_pitch;
+  std::vector<double>      pitch_cot_accum;
+  cv::Point                curr_point, curr_point_centerd;
+  std::vector< int >       positive_count_accum = std::vector< int >(accumulator_local_copy_.size(), 0); //this represents the binary blinking signal of the presumed marker (0 - off, otherwise - on)
+  for (int t = 0; t < step_count; t++) { //iterate over the accumulator frames
+    rad_expected_min        = floor(cot_set_min_[pitch_index] * t)-1;
+    rad_expectec_max        = ceil(cot_set_max_[pitch_index] * t)+1;
+    yaw_expected           = yaw_vals_[yaw_index]-M_PI;
+    positive_count_accum[t] = 0;
+    for (int k = 0; k < (int)(accumulator_local_copy_[t].size()); k++) { //iterate over the points in the current accumulator frame
+      curr_point         = accumulator_local_copy_[t][k];
+      curr_point_centerd = curr_point - origin_point;
+      curr_point_radius   = cv::norm(curr_point_centerd);
+      curr_point_radius_round   = round(curr_point_radius);
+      curr_point_max_dim = std::max(curr_point_centerd.x,curr_point_centerd.y);
+
+      curr_point_yaw = atan2(curr_point_centerd.y, curr_point_centerd.x);
+
+      if (curr_point_radius_round >= rad_expected_min){ if (curr_point_radius_round <= rad_expectec_max) { //select points in the expected pitch range (by comparing with the expected range of distances from the origin point)
+          if ((fabs(angDiff(curr_point_yaw, yaw_expected)) <= (yaw_div_)) || (curr_point_max_dim <= 4)) { //select points in the expected yaw range or points close enough to the origin point for yaw to be considered meaningless 
+            //store pitch and yaw of selected points expressed in two coordinates for easy averaging
+            positive_point_accum.push_back(curr_point_centerd);
+            positive_point_accum_pitch.push_back(cv::Point(curr_point_radius, t));
+            if (t>0)
+              pitch_cot_accum.push_back(curr_point_radius/((double)t));
+            else
+              pitch_cot_accum.push_back(curr_point_radius/(1.0));
+            positive_count_accum[t]++;
+          }
+        } }
+      if (debug_){
+        if ((curr_point_radius_round < rad_expected_min) || (curr_point_radius_round > rad_expectec_max))
+          std::cout << "curr_point_radius: " << curr_point_radius_round << ", t " << t << ":" << k <<" failed vs. [" << rad_expected_min<< "," <<rad_expectec_max << "]"  << std::endl;
+        else
+          std::cout << "curr_point_radius: " << curr_point_radius_round << ", t " << t << ":" << k <<" passed vs. [" << rad_expected_min<< "," <<rad_expectec_max << "]"  << std::endl;
+
+        if ( ((fabs(angDiff(curr_point_yaw, yaw_expected)) > (yaw_div_)) && (curr_point_max_dim > 4)) )
+          std::cout << "curr_point_yaw: " << curr_point_yaw << ", t " << t << ":" << k <<" failed vs. [" << yaw_expected<< "] by "  << angDiff(curr_point_yaw, yaw_expected) << " vs " << yaw_div_ << std::endl;
+        else
+          std::cout << "curr_point_yaw: " << curr_point_yaw << ", t " << t << ":" << k <<" passed vs. [" << yaw_expected<< "] by "  << angDiff(curr_point_yaw, yaw_expected) << " vs " << yaw_div_ << std::endl;
+      }
+    }
+  }
+  if (positive_point_accum.size() == 0) { //if no points were collected around the estimated trajectory, return severe error code - this should never happen
+    /* return -666.0; */
+    std::vector<int> sig;
+    sig.push_back(-666);
+    return sig;
+  }
+
+  if (debug_){
+    std::cout << "Accumulated:" << std::endl;
+    for (int i = 0; i < (int)(positive_count_accum.size()); i++) {
+      std::cout << positive_count_accum[i];
+    }
+    std::cout << std::endl;
+  }
+
+  //get averages for more precise trajectory estimates - the original estimates were quantized by the Hough space
+  avg_yaw         = angMeanXY(positive_point_accum);
+  avg_pitch       = angMeanXY(positive_point_accum_pitch);
+  avg_pitch_cot   = accumulate(pitch_cot_accum.begin(), pitch_cot_accum.end(), 0.0)/pitch_cot_accum.size(); 
+  std::vector< bool > correct = std::vector< bool >(positive_point_accum.size(), true);
+  for (int u = 0; u < (int)(positive_point_accum.size()); u++) { //iterate over the previously selected points
+    cv::Point exp_pt(cos(avg_yaw)*avg_pitch_cot*positive_point_accum_pitch[u].y, sin(avg_yaw)*avg_pitch_cot*positive_point_accum_pitch[u].y);
+    if (floor(cv::norm(exp_pt-positive_point_accum[u])) > (reasonable_radius_)) { //mark points that do not comply with the new trajectory as outliers
+      if (debug_){
+        std::cout << "Culling" << std::endl;
+        std::cout << "avg_pitch_cot: " << avg_pitch_cot << " avg_yaw " <<  avg_yaw << std::endl;
+        std::cout << "pitchCotSum: " << accumulate(pitch_cot_accum.begin(), pitch_cot_accum.end(), 0.0)<< " pitchCotSize " <<  pitch_cot_accum.size() << std::endl;
+        std::cout << "diff: " << exp_pt << " vs " <<  positive_point_accum[u] << std::endl;
+      }
+      correct[u] = false;
+    }
+  }
+  int o = 0;
+  for (int u = 0; u < (int)(correct.size()); u++) { //remove the marked outlier points
+    if (!correct[u]) {
+      positive_count_accum[positive_point_accum_pitch[o].y]--;
+      positive_point_accum.erase(positive_point_accum.begin() + o);
+      positive_point_accum_pitch.erase(positive_point_accum_pitch.begin() + o);
+      o--;
+    }
+    o++;
+  }
+
+  //recalculate averages with the cleaned up point set to suppres the influence of outliers on the estimated point trajectory line
+  avg_yaw   = angMeanXY(positive_point_accum);
+  avg_pitch = angMeanXY(positive_point_accum_pitch);
+
+  if (debug_){
+    std::cout << "After culling" << std::endl;
+    for (int i = 0; i < (int)(positive_count_accum.size()); i++) {
+      std::cout << positive_count_accum[i];
+    }
+    std::cout << std::endl;
+  }
+
+  //retrieve frequency (or detect incorrect signal) using a state machine pass over the retrieved signal
+  /* bool   state                  = false; */
+  /* bool   prev_state             = state; */
+  /* bool   down_step              = false; */
+  /* int    last_down_step_index   = 0; */
+  /* bool   up_step                = false; */
+  /* int    last_up_step_index     = 0; */
+  /* double period; */
+  /* double up_dur, down_dur; */
+  /* double max_period = 0; */
+  /* double min_period = mem_steps_; */
+  /* int    cnt_period = 0; */
+  /* int    sum_period = 0; */
+  std::vector<int> retrieved_signal;
+  for (int t = 0; t < (int)(accumulator_local_copy_.size()); t++) { //iterate over the accumulator frames
+    if (positive_count_accum[t] > 0) //set current value of the signal based on presence of selected points in the current accumulator frame
+      retrieved_signal.push_back(1);
+    else
+      retrieved_signal.push_back(0);
+  }
+  return retrieved_signal;
+}
+
 
 
 int HT4DBlinkerTracker::retrieveSignalID(cv::Point origin_point, double &avg_yaw, double &avg_pitch, std::vector<bool> &blink_signal) {

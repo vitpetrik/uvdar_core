@@ -285,7 +285,8 @@ private:
         if (!point_seen[camera_index][i].back().positions.empty()) {
           if (point_seen[camera_index][i].back().cnt_last_published >= 5) {
             mrs_msgs::ImagePointsWithFloatStamped msg;
-            msg.stamp        = point_seen[camera_index][i].back().sample_time;
+            /* msg.stamp        = point_seen[camera_index][i].back().sample_time; */
+            msg.stamp        = ros::Time::now(); 
             msg.image_width  = points_seen_msg->image_width;
             msg.image_height = points_seen_msg->image_height;
 

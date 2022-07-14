@@ -72,8 +72,19 @@ public:
    *
    * @return - The retrieved signal
    */
-  std::vector<bool> getSignal(int index);
+  /* std::vector<bool> getSignal(int index); */
+  std::vector<int> getSignal(int index);
 
+  /**
+   * @brief Retrieve the signal
+   *
+   * @param origin_point - The image point presumed to correspond to a blinking marker
+   * @param avg_yaw - The output "image yaw" of the blinking marker (corresponds to the direction in the image in which the point has been moving)
+   * @param avg_pitch - The output "image pitch" of the blinking marker (corresponds to the speed in the image at which the point has been moving)
+   *
+   * @return - the vector of estimated signal
+   */
+  std::vector<int> retrieveSignal(cv::Point origin_point, double &avg_yaw, double &avg_pitch);
 
   /**
    * @brief Retrieves the ID associated with the blinkig signal of a selected marker
@@ -231,7 +242,7 @@ private:
    *
    * @return - A vector of the retrieved image points corresponding to the peaks
    */
-  std::vector< cv::Point > findHoughPeaks(int peak_count);
+  std::vector< cv::Point > findHoughPeaks(int peak_count, int h_thr);
 
   /**
    * @brief Find a single peak in the Hough space in the vicinity of the expected image position
@@ -338,6 +349,7 @@ private:
 
   std::vector< double > yaw_averages_, pitch_averages_;
   std::vector<std::vector<bool>> signals_;
+  std::vector<std::vector<int>> cignals_;
 
   std::vector< cv::Point > fast_points_;
 
