@@ -3,6 +3,9 @@
 
 #include <thread>
 #include <mutex>
+#include <unordered_map>
+#include <algorithm>
+#include <iterator>
 #include <numeric>
 #include <fstream>
 #include <boost/filesystem/operations.hpp>
@@ -261,15 +264,13 @@ namespace uvdar {
     class AssociatedHypotheses {
       public:
         std::vector<Hypothesis> hypotheses;
-        int target;
         int verified_count = 0;
 
         bool debug;
 
-        AssociatedHypotheses(const std::vector<Hypothesis> &hs, int target_i, bool debug_i){
+        AssociatedHypotheses(const std::vector<Hypothesis> &hs, bool debug_i) {
           debug = debug_i;
           hypotheses = hs;
-          target = target_i;
           for (auto &h :hypotheses){
             if (h.flag == verified){
               verified_count++;
@@ -639,8 +640,6 @@ namespace uvdar {
 
         //}
 
-
-
         /* Subscribe to blinking point topics and advertise poses//{ */
         std::vector<std::string> _blinkers_seen_topics;
         param_loader.loadParam("blinkers_seen_topics", _blinkers_seen_topics, _blinkers_seen_topics);
@@ -1008,17 +1007,23 @@ namespace uvdar {
           }
           {
             std::scoped_lock lock(transformer_mutex);
-            auto fromcam_tmp = transformer_.getTransform(_camera_frames_[image_index],_uav_name_+"/"+_output_frame_, latest_local.time - ros::Duration(0.1));
+            auto fromcam_tmp = transformer_.getTransform(_camera_frames_[image_index],_uav_name_+"/"+_output_frame_, latest_local.time);
             if (!fromcam_tmp){
-              ROS_ERROR_STREAM_THROTTLE(1.0,"[UVDARPoseCalculator]: Could not obtain transform from " << _camera_frames_[image_index] << " to " <<  _uav_name_+"/"+_output_frame_ << "!");
+              fromcam_tmp = transformer_.getTransform(_camera_frames_[image_index],_uav_name_+"/"+_output_frame_, ros::Time(0));
+              if (!fromcam_tmp){
+                ROS_ERROR_STREAM_THROTTLE(1.0,"[UVDARPoseCalculator]: Could not obtain transform from " << _camera_frames_[image_index] << " to " <<  _uav_name_+"/"+_output_frame_ << "!");
               continue;
+              }
             }
             fromcam_tf = fromcam_tmp.value();
 
-            auto tocam_tmp = transformer_.getTransform(_uav_name_+"/"+_output_frame_,_camera_frames_[image_index], latest_local.time - ros::Duration(0.1));
+            auto tocam_tmp = transformer_.getTransform(_uav_name_+"/"+_output_frame_,_camera_frames_[image_index], latest_local.time);
             if (!tocam_tmp){
-              ROS_ERROR_STREAM_THROTTLE(1.0,"[UVDARPoseCalculator]: Could not obtain transform from " << _uav_name_+"/"+_output_frame_ << " to " << _camera_frames_[image_index] << "!");
-              continue;
+              tocam_tmp = transformer_.getTransform(_uav_name_+"/"+_output_frame_,_camera_frames_[image_index], ros::Time(0));
+              if (!tocam_tmp){
+                ROS_ERROR_STREAM_THROTTLE(1.0,"[UVDARPoseCalculator]: Could not obtain transform from " << _uav_name_+"/"+_output_frame_ << " to " << _camera_frames_[image_index] << "!");
+                continue;
+              }
             }
             tocam_tf = tocam_tmp.value();
           }
@@ -1027,7 +1032,6 @@ namespace uvdar {
           /* batch_processsed_[image_index] = false; */
 
           /* int                        countSeen; */
-          std::vector<uvdar_core::Point2DWithFloat> points;
           last_blink_time_ = latest_local.time;
           if (_debug_)
             ROS_INFO_STREAM("[UVDARPoseCalculator]: Received points: " << latest_local.points.size());
@@ -1060,20 +1064,34 @@ namespace uvdar {
           /*   /1* } *1/ /1* } *1/ */
         /* } */
 
-          /* ROS_INFO("[UVDARPoseCalculator]:IN: E"); */
-          for (const auto& point : latest_local.points) {
-            if (_use_masks_){
-              if (_masks_[image_index].at<unsigned char>(cv::Point2i(point.x, point.y)) < 100){
-                if (_debug_){
-                  ROS_INFO_STREAM("[UVDARPoseCalculator]: Discarding point " << cv::Point2i(point.x, point.y) << " with f="  << point.value);
-                }
-                continue;
-              }
-            }
+          std::vector<uvdar_core::Point2DWithFloat> points;
+          // /* ROS_INFO("[UVDARPoseCalculator]:IN: E"); */
+          // for (const auto& point : latest_local.points) {
+          //   if (_use_masks_){
+          //     if (_masks_[image_index].at<unsigned char>(cv::Point2i(point.x, point.y)) < 100){
+          //       if (_debug_){
+          //         ROS_INFO_STREAM("[UVDARPoseCalculator]: Discarding point " << cv::Point2i(point.x, point.y) << " with f="  << point.value);
+          //       }
+          //       continue;
+          //     }
+          //   }
 
-            if (point.value <= 200) {
-              points.push_back(point);
-            }
+          //   if (point.value <= 200) {
+          //     points.push_back(point);
+          //   }
+          // }
+
+          if (_use_masks_)
+          {
+            auto is_valid_point = [&](const uvdar_core::Point2DWithFloat &p)
+            { return _masks_[image_index].at<int>(cv::Point2i(p.x, p.y)) >= 100; };
+            std::copy_if(latest_local.points.begin(), latest_local.points.end(), std::back_inserter(points), is_valid_point);
+          }
+          else
+          {
+            auto is_valid_point = [&](const uvdar_core::Point2DWithFloat &point)
+            { return point.value <= 200; };
+            std::copy_if(latest_local.points.begin(), latest_local.points.end(), std::back_inserter(points), is_valid_point);
           }
 
           /* ROS_INFO("[UVDARPoseCalculator]:IN: F"); */
@@ -1090,86 +1108,75 @@ namespace uvdar {
           /* msg_constuents_hypo_array.header.frame_id = _camera_frames_[image_index]; */
           /* msg_constuents_hypo_array.header.stamp = last_blink_time_; */
 
-          std::vector<ImageCluster> separated_points;
-          if ((int)(points.size()) > 0) {
-            separated_points = separateBySignals(points);
+          std::vector<ImageCluster> separated_points = separateBySignals(points);
 
-          /* ROS_INFO("[UVDARPoseCalculator]:IN: G"); */
-            auto start_target_cycle = profiler_thread_.getTime();
-            /* profiler_thread_.indent(); */
-            for (int i = 0; i < ((int)(separated_points.size())); i++) {
+        /* ROS_INFO("[UVDARPoseCalculator]:IN: G"); */
+          auto start_target_cycle = profiler_thread_.getTime();
+          /* profiler_thread_.indent(); */
+          for (int i = 0; i < ((int)(separated_points.size())); i++) {
 
-              /* auto start_target_iteration = profiler_thread_.getTime(); */
-              if (_debug_){
-                ROS_INFO_STREAM("[UVDARPoseCalculator]: target [" << separated_points[i].ID << "]: ");
-                ROS_INFO_STREAM("[UVDARPoseCalculator]: p: ");
-                for (auto pt : separated_points[i].points)
-                  ROS_INFO_STREAM("[UVDARPoseCalculator]:    " << pt.position << ", ID: " << pt.ID);
-              }
-              mrs_msgs::PoseWithCovarianceIdentified pose;
-              /* std::vector<mrs_msgs::PoseWithCovarianceIdentified> constituents; */
-              std::vector<Hypothesis> new_hypotheses;
-              /* bool res = extractSingleRelative(separated_points[i].second, separated_points[i].first, image_index, pose, constituents, new_hypotheses); */
-              /* ROS_INFO("[%s]: C:%d - Image clusters: %d", ros::this_node::getName().c_str(), image_index, (int)(separated_points.size())); */
-              new_hypotheses = extractHypotheses(separated_points[i].points, separated_points[i].ID, image_index, fromcam_tf, tocam_tf, profiler_thread_, latest_local.time);
-              /* ROS_INFO("[%s]: C:%d - New hypothesis count: %d", ros::this_node::getName().c_str(), image_index, (int)(new_hypotheses.size())); */
+            /* auto start_target_iteration = profiler_thread_.getTime(); */
+            if (_debug_){
+              ROS_INFO_STREAM("[UVDARPoseCalculator]: target [" << separated_points[i].ID << "]: ");
+              ROS_INFO_STREAM("[UVDARPoseCalculator]: p: ");
+              for (auto pt : separated_points[i].points)
+                ROS_INFO_STREAM("[UVDARPoseCalculator]:    " << pt.position << ", ID: " << pt.ID);
+            }
+            mrs_msgs::PoseWithCovarianceIdentified pose;
+            /* std::vector<mrs_msgs::PoseWithCovarianceIdentified> constituents; */
+            std::vector<Hypothesis> new_hypotheses;
+            /* bool res = extractSingleRelative(separated_points[i].second, separated_points[i].first, image_index, pose, constituents, new_hypotheses); */
+            /* ROS_INFO("[%s]: C:%d - Image clusters: %d", ros::this_node::getName().c_str(), image_index, (int)(separated_points.size())); */
+            new_hypotheses = extractHypotheses(separated_points[i].points, separated_points[i].ID, image_index, fromcam_tf, tocam_tf, profiler_thread_, latest_local.time);
+            /* ROS_INFO("[%s]: C:%d - New hypothesis count: %d", ros::this_node::getName().c_str(), image_index, (int)(new_hypotheses.size())); */
 
-              /* if (res){ */
-              /*   msg_measurement_array.poses.push_back(pose); */
+            /* if (res){ */
+            /*   msg_measurement_array.poses.push_back(pose); */
 
-                /* if (_publish_constituents_){ */
-                /*   for (auto &constituent : constituents){ */
-                /*     msg_constuents_array.poses.push_back(constituent); */
-                /*   } */
-                /*   if (PUBLISH_HYPO_CONSTITUENTS){ */
-                /*     for (auto &constituent : new_hypotheses){ */
-                /*       msg_constuents_hypo_array.poses.push_back(constituent); */
-                /*     } */
-                /*   } */
-                /* } */
-
-
-                /* profiler.addValueSince("Target "+std::to_string(separated_points[i].first),start_target_iteration); */
-                /* if (_profiling_){ */
-                /* } */
+              /* if (_publish_constituents_){ */
+              /*   for (auto &constituent : constituents){ */
+              /*     msg_constuents_array.poses.push_back(constituent); */
+              /*   } */
+              /*   if (PUBLISH_HYPO_CONSTITUENTS){ */
+              /*     for (auto &constituent : new_hypotheses){ */
+              /*       msg_constuents_hypo_array.poses.push_back(constituent); */
+              /*     } */
+              /*   } */
               /* } */
 
-              profiler_thread_.addValueSince("All targets",start_target_cycle);
 
-              if (_profiling_){
-                profiler_thread_.printAll("[UVDARPoseCalculator]: [cam:"+std::to_string(image_index)+"]:");
-              }
-              profiler_thread_.clear();
+              /* profiler.addValueSince("Target "+std::to_string(separated_points[i].first),start_target_iteration); */
+              /* if (_profiling_){ */
+              /* } */
+            /* } */
 
-              /* HypothesesToGlobal(new_hypotheses, image_index,latest_local.time); */
+            profiler_thread_.addValueSince("All targets",start_target_cycle);
+
+            if (_profiling_){
+              profiler_thread_.printAll("[UVDARPoseCalculator]: [cam:"+std::to_string(image_index)+"]:");
+            }
+            profiler_thread_.clear();
+
+            /* HypothesesToGlobal(new_hypotheses, image_index,latest_local.time); */
+            {
+              std::scoped_lock lock(hypothesis_mutex);
+              auto ah = hypothesis_map_.find(separated_points[i].ID%1000);
+
+              if (ah != hypothesis_map_.end())
               {
-                std::scoped_lock lock(hypothesis_mutex);
-                int index = 0;
-                bool found = false;
-                for (auto &hb : hypothesis_buffer_){
-                  if (hb.target == (separated_points[i].ID%1000)){
-                    found = true;
-                    break;
-                  }
-                  index++;
-                }
-
-                if (!found){
-                  /* hypothesis_buffer_.push_back({.hypotheses = new_hypotheses,.target = (separated_points[i].ID%1000),.verified_count = 0}); */
-                  hypothesis_buffer_.push_back(AssociatedHypotheses(new_hypotheses, (separated_points[i].ID%1000), _debug_));
-                }
-                else{
-
-                  removeExtraHypotheses(index, latest_local.time);
-                  ROS_INFO("[%s]: Culling. Curr hypothesis count: %d", ros::this_node::getName().c_str(), (int)(hypothesis_buffer_.at(index).hypotheses.size()));
-                  /* hypothesis_buffer_.at(index).hypotheses.insert(hypothesis_buffer_.at(index).hypotheses.end(), new_hypotheses.begin(), new_hypotheses.end()); */
-                  hypothesis_buffer_.at(index).addHypotheses(new_hypotheses);
-                  /* hypothesis_buffer_.at(index).verified_count+=(int)(new_hypotheses.size()); */
-                  ROS_INFO("[%s]: Inserting new. Curr hypothesis count: %d", ros::this_node::getName().c_str(), (int)(hypothesis_buffer_.at(index).hypotheses.size()));
-                }
-
+                removeExtraHypotheses(ah->second, latest_local.time);
+                ROS_INFO("[%s]: Culling. Curr hypothesis count: %d", ros::this_node::getName().c_str(), (int)(ah->second.hypotheses.size()));
+                /* hypothesis_buffer_.at(index).hypotheses.insert(hypothesis_buffer_.at(index).hypotheses.end(), new_hypotheses.begin(), new_hypotheses.end()); */
+                ah->second.addHypotheses(new_hypotheses);
+                /* hypothesis_buffer_.at(index).verified_count+=(int)(new_hypotheses.size()); */
+                ROS_INFO("[%s]: Inserting new. Curr hypothesis count: %d", ros::this_node::getName().c_str(), (int)(ah->second.hypotheses.size()));
+              }
+              else
+              {
+                hypothesis_map_.insert({separated_points[i].ID % 1000, AssociatedHypotheses(new_hypotheses, _debug_)});
               }
             }
+          }
           /* ROS_INFO("[UVDARPoseCalculator]:IN: H"); */
             /* profiler_thread_.unindent(); */
 
@@ -1180,12 +1187,11 @@ namespace uvdar {
             /*   } */
             /* } */
 
-          }
 
         }
         ROS_INFO("[%s]: Hypothesis count: ", ros::this_node::getName().c_str());
-        for (auto &hb : hypothesis_buffer_){
-          ROS_INFO("[%s]:     target: %d: %d", ros::this_node::getName().c_str(), hb.target,(int)(hb.hypotheses.size()));
+        for (auto &hb : hypothesis_map_){
+          ROS_INFO("[%s]:     target: %d: %d", ros::this_node::getName().c_str(), hb.first ,(int)(hb.second.hypotheses.size()));
         }
         batch_processsed_ = true;
 
@@ -1203,25 +1209,24 @@ namespace uvdar {
          */
         /* ParticleFilterThread() //{ */
         void ParticleFilterThread([[maybe_unused]] const ros::TimerEvent& te) {
-          if ((!initialized_)){
+          if (!initialized_)
             return;
-          }
           /* ROS_INFO("[UVDARPoseCalculator]:PF: A"); */
 
           auto now_time = ros::Time::now();
           if (true){
           /* if (false){ */
-            for (int index = 0; index < (int)(hypothesis_buffer_.size()); index++){
+            for (auto &ah : hypothesis_map_){
               std::scoped_lock lock(hypothesis_mutex);
-              int verified_count = hypothesis_buffer_.at(index).verified_count;
-              ROS_INFO("[%s]: Prev. hypothesis count: %d, of which verified: %d", ros::this_node::getName().c_str(), (int)(hypothesis_buffer_.at(index).hypotheses.size()), verified_count);
+              int verified_count = ah.second.verified_count;
+              ROS_INFO("[%s]: Prev. hypothesis count: %d, of which verified: %d", ros::this_node::getName().c_str(), (int)(ah.second.hypotheses.size()), verified_count);
               profiler_main_.indent();
-              auto mutations = mutateHypotheses(hypothesis_buffer_.at(index).hypotheses, std::min(std::max(0,MAX_HYPOTHESIS_COUNT - (int)(hypothesis_buffer_.at(index).hypotheses.size())),verified_count), now_time);
+              auto mutations = mutateHypotheses(ah.second.hypotheses, std::min(std::max(0,MAX_HYPOTHESIS_COUNT - (int)(ah.second.hypotheses.size())), verified_count), now_time);
               /* auto mutations = mutateHypotheses(hypothesis_buffer_.at(index).hypotheses, MUTATION_COUNT); */
               ROS_INFO("[%s]: Made: %d mutations", ros::this_node::getName().c_str(), (int)(mutations.size()));
               profiler_main_.unindent();
-              hypothesis_buffer_.at(index).hypotheses.insert(hypothesis_buffer_.at(index).hypotheses.end(), mutations.begin(), mutations.end());
-              ROS_INFO("[%s]: Adding mutations to set. Curr hypothesis count: %d", ros::this_node::getName().c_str(), (int)(hypothesis_buffer_.at(index).hypotheses.size()));
+              ah.second.hypotheses.insert(ah.second.hypotheses.end(), mutations.begin(), mutations.end());
+              ROS_INFO("[%s]: Adding mutations to set. Curr hypothesis count: %d", ros::this_node::getName().c_str(), (int)(ah.second.hypotheses.size()));
             }
 
           /* ROS_INFO("[UVDARPoseCalculator]:PF: B"); */
@@ -1242,20 +1247,25 @@ namespace uvdar {
           /* ROS_INFO("[UVDARPoseCalculator]:PF: C"); */
             {
               std::scoped_lock lock(transformer_mutex);
-              auto tocam_tmp = transformer_.getTransform(_uav_name_+"/"+_output_frame_,_camera_frames_[image_index], latest_local.time - ros::Duration(0.1));
+              auto tocam_tmp = transformer_.getTransform(_uav_name_+"/"+_output_frame_,_camera_frames_[image_index], latest_local.time);
               if (!tocam_tmp){
-                /* ROS_ERROR_STREAM("[UVDARPoseCalculator]:PF: Could not obtain transform from " << _uav_name_+"/"+_output_frame_ << " to " << _camera_frames_[image_index] << "!"); */
-                continue;
+                tocam_tmp = transformer_.getTransform(_uav_name_+"/"+_output_frame_,_camera_frames_[image_index], ros::Time(0));
+                if (!tocam_tmp){
+                  ROS_ERROR_STREAM("[UVDARPoseCalculator]:PF: Could not obtain transform from " << _uav_name_+"/"+_output_frame_ << " to " << _camera_frames_[image_index] << "!");
+                  continue;
+                }
               }
               tocam_tf = tocam_tmp.value();
             }
           /* ROS_INFO("[UVDARPoseCalculator]:PF: D"); */
 
-            for (int index = 0; index < (int)(hypothesis_buffer_.size()); index++){
+            for (auto &ah : hypothesis_map_)
+            {
+            // for (int index = 0; index < (int)(hypothesis_buffer_.size()); index++){
               {
                 std::scoped_lock lock(hypothesis_mutex);
 
-                ROS_INFO("[%s]: C:%d, I:%d Refining. Prev. hypothesis count: %d", ros::this_node::getName().c_str(), image_index, index, (int)(hypothesis_buffer_.at(index).hypotheses.size()));
+                ROS_INFO("[%s]: C:%d, I:%d Refining. Prev. hypothesis count: %d", ros::this_node::getName().c_str(), image_index, ah.first, (int)(ah.second.hypotheses.size()));
 
                   /* auto start = profiler.getTime(); */
                 /* auto local_hypotheses = HypothesesToLocal(hypothesis_buffer_,image_index); */
@@ -1278,17 +1288,15 @@ namespace uvdar {
                 double threshold_reproject_verified = PF_REPROJECT_THRESHOLD_VERIFIED(image_index);
 
                 profiler_main_.indent();
-                checkHypothesisFitness(hypothesis_buffer_.at(index), image_index, threshold_reproject_unfit, threshold_reproject_verified, separated_points, tocam_tf, latest_local.time);
-                removeUnfitHypotheses(hypothesis_buffer_.at(index));
+                checkHypothesisFitness(ah.second, image_index, threshold_reproject_unfit, threshold_reproject_verified, separated_points, tocam_tf, latest_local.time);
+                removeUnfitHypotheses(ah.second);
                 profiler_main_.unindent();
-                ROS_INFO("[%s]: C:%d, I:%d Curr. hypothesis count: %d", ros::this_node::getName().c_str(), image_index, index, (int)(hypothesis_buffer_.at(index).hypotheses.size()));
+                ROS_INFO("[%s]: C:%d, I:%d Curr. hypothesis count: %d", ros::this_node::getName().c_str(), image_index, ah.first, (int)(ah.second.hypotheses.size()));
                 /* ROS_INFO("[%s]: C:%d Removing extras, left: %d", ros::this_node::getName().c_str(), image_index, (int)(hypothesis_buffer_.at(index).hypotheses.size())); */
               }
 
           /* ROS_INFO("[UVDARPoseCalculator]:PF: E"); */
-              removeOldHypotheses(index,latest_local.time);
-
-
+              removeOldHypotheses(ah.second, latest_local.time);
           /* ROS_INFO("[UVDARPoseCalculator]:PF: F"); */
             }
           }
@@ -1300,11 +1308,11 @@ namespace uvdar {
             msg_constuents_array.header.frame_id = _uav_name_+"/"+_output_frame_;
             msg_constuents_array.header.stamp = latest_input_data_[0].time;
 
-            for (auto &hb : hypothesis_buffer_){
-              for (auto &h : hb.hypotheses){
+            for (auto &ah : hypothesis_map_){
+              for (auto &h : ah.second.hypotheses){
 
                 mrs_msgs::PoseWithCovarianceIdentified constituent;
-                constituent.id = h.index;
+                constituent.id = ah.first;
                 constituent.pose.position.x = h.pose.position.x();
                 constituent.pose.position.y = h.pose.position.y();
                 constituent.pose.position.z = h.pose.position.z();
@@ -1329,12 +1337,12 @@ namespace uvdar {
           mrs_msgs::PoseWithCovarianceArrayStamped msg_output;
           msg_output.header.frame_id = _uav_name_+"/"+_output_frame_;
           msg_output.header.stamp = latest_input_data_[0].time;
-          for (auto &hb : hypothesis_buffer_){
+          for (auto &ah : hypothesis_map_){
             mrs_msgs::PoseWithCovarianceIdentified msg_target;
-            auto res = getMeasurementElipsoidHull(hb);
+            auto res = getMeasurementElipsoidHull(ah.second);
             if (res){
               auto [m, C] = res.value();
-              msg_target.id = hb.target;
+              msg_target.id = ah.first;
               msg_target.pose.position.x = m.position.x();
               msg_target.pose.position.y = m.position.y();
               msg_target.pose.position.z = m.position.z();
@@ -1390,8 +1398,9 @@ namespace uvdar {
 
           return output;
         }
-        
-        void checkHypothesisFitness(AssociatedHypotheses &hypotheses, int image_index, double threshold_unfit, double threshold_verified, std::vector<ImageCluster> points, geometry_msgs::TransformStamped tocam_tf, ros::Time time){
+
+        void checkHypothesisFitness(AssociatedHypotheses &hypotheses, int image_index, double threshold_unfit, double threshold_verified, std::vector<ImageCluster> points, geometry_msgs::TransformStamped tocam_tf, ros::Time time)
+        {
           /* InputData latest_local; */
           /* { */
           /*   std::scoped_lock lock(input_mutex); */
@@ -1402,46 +1411,47 @@ namespace uvdar {
 
           std::vector<ImagePointIdentified> associated_points;
           /* int i=0; */
-          for (auto &pts : points){
-            if ((pts.ID%1000)==(hypotheses.target%1000)){
-              associated_points = pts.points;
-              int i = 0;
-              for (auto &h : hypotheses.hypotheses){
-                if (isInView(h,image_index, tocam_tf)){
+          for (auto &pts : points)
+          {
+            associated_points = pts.points;
+            int i = 0;
+            for (auto &h : hypotheses.hypotheses)
+            {
+              if (isInView(h, image_index, tocam_tf))
+              {
+                auto model_curr = model_.rotate(h.pose.orientation).translate(h.pose.position);
 
-                  auto model_curr = model_.rotate(h.pose.orientation).translate(h.pose.position);
+                double threshold_scaled_unfit = (int)(associated_points.size()) * threshold_unfit;
+                double threshold_scaled_verified = (int)(associated_points.size()) * threshold_verified;
+                double error_total = totalError(model_curr, associated_points, h.index, image_index, tocam_tf);
+                /* ROS_INFO("[%s]: error: %f vs threshold_scaled: %f", ros::this_node::getName().c_str(), error_total, threshold_scaled); */
 
-                  double threshold_scaled_unfit = (int)(associated_points.size())*threshold_unfit;
-                  double threshold_scaled_verified = (int)(associated_points.size())*threshold_verified;
-                  double error_total = totalError(model_curr, associated_points, h.index, image_index, tocam_tf);
-                  /* ROS_INFO("[%s]: error: %f vs threshold_scaled: %f", ros::this_node::getName().c_str(), error_total, threshold_scaled); */
-
-                  if (error_total > threshold_scaled_unfit){
-                    ROS_INFO_STREAM("[UVDARPoseCalculator]: setting hypo as unfit, err:" << error_total << " vs " << threshold_scaled_unfit);
-                    /* if (h.flag == verified) */
-                    /*   hypotheses.verified_count--; */
-                    /* h.flag = unfit; */
-                    hypotheses.setUnfit(i);
-                    /* h.updated = time; */
-                  }
-                  else if (error_total < threshold_scaled_verified) {
-                    ROS_INFO_STREAM("[UVDARPoseCalculator]: setting hypo as verified, err:" << error_total << " vs " << threshold_scaled_verified);
-                    /* if (h.flag != verified) */
-                    /*   hypotheses.verified_count++; */
-                    /* h.flag = verified; */
-                    hypotheses.setVerified(i);
-                    /* h.updated = time; */
-                  }
-                  else {
-                    hypotheses.setNeutral(i);
-                  }
-                  h.updated = time;
+                if (error_total > threshold_scaled_unfit)
+                {
+                  ROS_INFO_STREAM("[UVDARPoseCalculator]: setting hypo as unfit, err:" << error_total << " vs " << threshold_scaled_unfit);
+                  /* if (h.flag == verified) */
+                  /*   hypotheses.verified_count--; */
+                  /* h.flag = unfit; */
+                  hypotheses.setUnfit(i);
+                  /* h.updated = time; */
                 }
-                i++;
+                else if (error_total < threshold_scaled_verified)
+                {
+                  ROS_INFO_STREAM("[UVDARPoseCalculator]: setting hypo as verified, err:" << error_total << " vs " << threshold_scaled_verified);
+                  /* if (h.flag != verified) */
+                  /*   hypotheses.verified_count++; */
+                  /* h.flag = verified; */
+                  hypotheses.setVerified(i);
+                  /* h.updated = time; */
+                }
+                else
+                {
+                  hypotheses.setNeutral(i);
+                }
+                h.updated = time;
               }
+              i++;
             }
-            else
-              continue;
           }
         }
 
@@ -1462,44 +1472,44 @@ namespace uvdar {
           }
         }
 
-        void removeExtraHypotheses(int index, ros::Time time){
-          int init_size = (int)(hypothesis_buffer_.at(index).hypotheses.size());
-          removeOldHypotheses(index, time);
+        void removeExtraHypotheses(AssociatedHypotheses &hypotheses, ros::Time time){
+          int init_size = (int)(hypotheses.hypotheses.size());
+          removeOldHypotheses(hypotheses, time);
           int i = 0;
-          while ((int)(hypothesis_buffer_.at(index).hypotheses.size()) > MAX_HYPOTHESIS_COUNT){ //first, let's try to remove the unverified only...
-            int cull_index = rand() % (int)(hypothesis_buffer_.at(index).hypotheses.size());
-            if (hypothesis_buffer_.at(index).hypotheses[cull_index].flag !=verified){
+          while ((int)(hypotheses.hypotheses.size()) > MAX_HYPOTHESIS_COUNT){ //first, let's try to remove the unverified only...
+            int cull_index = rand() % (int)(hypotheses.hypotheses.size());
+            if (hypotheses.hypotheses[cull_index].flag !=verified){
               if (_debug_)
                 ROS_INFO_STREAM("[UVDARPoseCalculator]: Culling extra unverified hypothesis.");
-              hypothesis_buffer_.at(index).removeHypothesis(cull_index);
+              hypotheses.removeHypothesis(cull_index);
             }
               /* hypothesis_buffer_.at(index).hypotheses.erase(hypothesis_buffer_.at(index).hypotheses.begin()+cull_index); //remove */
             i++;
             if (i > init_size)
               break;
           }
-          while ((int)(hypothesis_buffer_.at(index).hypotheses.size()) > MAX_HYPOTHESIS_COUNT){
-            int cull_index = rand() % (int)(hypothesis_buffer_.at(index).hypotheses.size());
+          while ((int)(hypotheses.hypotheses.size()) > MAX_HYPOTHESIS_COUNT){
+            int cull_index = rand() % (int)(hypotheses.hypotheses.size());
             /* if (hypothesis_buffer_.at(index).hypotheses[cull_index].flag == verified) */
               /* hypothesis_buffer_.at(index).verified_count--; */
             /* hypothesis_buffer_.at(index).hypotheses.erase(hypothesis_buffer_.at(index).hypotheses.begin()+cull_index); //remove */
               if (_debug_)
                 ROS_INFO_STREAM("[UVDARPoseCalculator]: Culling extra hypothesis.");
-            hypothesis_buffer_.at(index).removeHypothesis(cull_index);
+            hypotheses.removeHypothesis(cull_index);
           }
           return;
         }
 
-        void removeOldHypotheses(int index, ros::Time time){
+        void removeOldHypotheses(AssociatedHypotheses &hypotheses, ros::Time time){
           int i = 0;
-          while (i < (int)(hypothesis_buffer_.at(index).hypotheses.size())){ //first, let's try to remove the unverified only...
-            if (ros::Duration(time - hypothesis_buffer_.at(index).hypotheses[i].updated).toSec() > MAX_HYPOTHESIS_AGE){
+          while (i < (int)(hypotheses.hypotheses.size())){ //first, let's try to remove the unverified only...
+            if (ros::Duration(time - hypotheses.hypotheses[i].updated).toSec() > MAX_HYPOTHESIS_AGE){
               /* if (hypothesis_buffer_.at(index).hypotheses[i].flag == verified) */
               /*   hypothesis_buffer_.at(index).verified_count--; */
               /* hypothesis_buffer_.at(index).hypotheses.erase(hypothesis_buffer_.at(index).hypotheses.begin()+i); //remove old */
               if (_debug_)
-                ROS_INFO_STREAM("[UVDARPoseCalculator]: Hypothesis is " << ros::Duration(time - hypothesis_buffer_.at(index).hypotheses[i].updated).toSec() << " old.");
-              hypothesis_buffer_.at(index).removeHypothesis(i);
+                ROS_INFO_STREAM("[UVDARPoseCalculator]: Hypothesis is " << ros::Duration(time - hypotheses.hypotheses[i].updated).toSec() << " old.");
+              hypotheses.removeHypothesis(i);
             }
             else {
               i++;
@@ -1666,6 +1676,8 @@ namespace uvdar {
         std::vector<ImageCluster> separated_points;
         /* separated_points.resize(_target_count_); */
 
+        if (points.size() == 0)
+          return separated_points;
 
         for (int i = 0; i < (int)(points.size()); i++) {
           /* if (points[i].z > 1) { */
@@ -4190,6 +4202,8 @@ namespace uvdar {
         /* std::vector<ros::Publisher> pub_constituent_poses_; */
         ros::Publisher pub_hypotheses_;
 
+        ros::Publisher pub_directions_;
+
         std::vector<int> _signal_ids_;
         int signals_per_target_;
         int _target_count_;
@@ -4252,12 +4266,12 @@ namespace uvdar {
         ros::Timer timer_initializer_;
         ros::Timer timer_particle_filter_;
 
+        std::unordered_map<int, AssociatedHypotheses> hypothesis_map_;
         std::vector<InputData> latest_input_data_;
         /* std::vector<geometry_msgs::TransformStamped> tocam_tf_; */
         /* std::vector<geometry_msgs::TransformStamped> fromcam_tf_; */
         /* std::vector<InputData> previous_input_data_; */
 
-        std::vector<AssociatedHypotheses> hypothesis_buffer_;
 
         //}
   };
