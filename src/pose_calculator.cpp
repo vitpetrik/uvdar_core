@@ -27,6 +27,7 @@
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/highgui/highgui.hpp>
 
+#include "Eigen/src/Core/Matrix.h"
 #include "OCamCalib/ocam_functions.h"
 #include <unscented/unscented.h>
 /* #include <p3p/P3p.h> */
@@ -1214,24 +1215,26 @@ namespace uvdar {
           /* ROS_INFO("[UVDARPoseCalculator]:PF: A"); */
 
           auto now_time = ros::Time::now();
-          if (true){
-          /* if (false){ */
-            for (auto &ah : hypothesis_map_){
-              std::scoped_lock lock(hypothesis_mutex);
-              int verified_count = ah.second.verified_count;
-              ROS_INFO("[%s]: Prev. hypothesis count: %d, of which verified: %d", ros::this_node::getName().c_str(), (int)(ah.second.hypotheses.size()), verified_count);
-              profiler_main_.indent();
-              auto mutations = mutateHypotheses(ah.second.hypotheses, std::min(std::max(0,MAX_HYPOTHESIS_COUNT - (int)(ah.second.hypotheses.size())), verified_count), now_time);
-              /* auto mutations = mutateHypotheses(hypothesis_buffer_.at(index).hypotheses, MUTATION_COUNT); */
-              ROS_INFO("[%s]: Made: %d mutations", ros::this_node::getName().c_str(), (int)(mutations.size()));
-              profiler_main_.unindent();
-              ah.second.hypotheses.insert(ah.second.hypotheses.end(), mutations.begin(), mutations.end());
-              ROS_INFO("[%s]: Adding mutations to set. Curr hypothesis count: %d", ros::this_node::getName().c_str(), (int)(ah.second.hypotheses.size()));
-            }
+
+          for (auto &ah : hypothesis_map_)
+          {
+            std::scoped_lock lock(hypothesis_mutex);
+            int verified_count = ah.second.verified_count;
+            ROS_INFO("[%s]: Prev. hypothesis count: %d, of which verified: %d", ros::this_node::getName().c_str(), (int)(ah.second.hypotheses.size()), verified_count);
+            profiler_main_.indent();
+            auto mutations = mutateHypotheses(ah.second.hypotheses, std::min(std::max(0,MAX_HYPOTHESIS_COUNT - (int)(ah.second.hypotheses.size())), verified_count), now_time);
+            /* auto mutations = mutateHypotheses(hypothesis_buffer_.at(index).hypotheses, MUTATION_COUNT); */
+            ROS_INFO("[%s]: Made: %d mutations", ros::this_node::getName().c_str(), (int)(mutations.size()));
+            profiler_main_.unindent();
+            ah.second.hypotheses.insert(ah.second.hypotheses.end(), mutations.begin(), mutations.end());
+            ROS_INFO("[%s]: Adding mutations to set. Curr hypothesis count: %d", ros::this_node::getName().c_str(), (int)(ah.second.hypotheses.size()));
+          }
+
+          std::vector<std::tuple<ros::Time, geometry_msgs::TransformStamped, int, std::vector<ImageCluster>>> observations;
 
           /* ROS_INFO("[UVDARPoseCalculator]:PF: B"); */
-          for (unsigned int image_index = 0; image_index < _camera_count_; image_index++){
-
+          for (unsigned int image_index = 0; image_index < _camera_count_; image_index++)
+          {
             InputData latest_local;
             geometry_msgs::TransformStamped tocam_tf;
             {
@@ -1257,49 +1260,69 @@ namespace uvdar {
               }
               tocam_tf = tocam_tmp.value();
             }
+
+            observations.push_back(std::make_tuple(latest_local.time, tocam_tf, image_index, separated_points));
+          }
           /* ROS_INFO("[UVDARPoseCalculator]:PF: D"); */
 
-            for (auto &ah : hypothesis_map_)
+          for(auto &obs : observations)
+          {
+            auto [latest_local_time, tocam_tf, image_index, separated_points] = obs;
+            for (auto &pts : separated_points)
             {
-            // for (int index = 0; index < (int)(hypothesis_buffer_.size()); index++){
+              std::scoped_lock lock(hypothesis_mutex);
+              auto ah = hypothesis_map_.find(pts.ID % 1000);
+
+              if (ah == hypothesis_map_.end())
               {
-                std::scoped_lock lock(hypothesis_mutex);
-
-                ROS_INFO("[%s]: C:%d, I:%d Refining. Prev. hypothesis count: %d", ros::this_node::getName().c_str(), image_index, ah.first, (int)(ah.second.hypotheses.size()));
-
-                  /* auto start = profiler.getTime(); */
-                /* auto local_hypotheses = HypothesesToLocal(hypothesis_buffer_,image_index); */
-                /* ROS_INFO("[%s]: C:%d Checking...", ros::this_node::getName().c_str(), image_index); */
-                /* ROS_INFO("[%s]: C:%d Removing unfit and mutating. Prev. hypthesis count: %d", ros::this_node::getName().c_str(), image_index, (int)(hypothesis_buffer_.size())); */
-                /* auto mutations = removeUnfitAndMutateHypotheses(hypothesis_buffer_.at(index).first); */
-
-                /* ROS_INFO("[%s]: C:%d Finding unfit mutations. Prev. mutation count: %d", ros::this_node::getName().c_str(), image_index, (int)(mutations.size())); */
-                /* double threshold_mutation = PF_MUTATION_THRESHOLD(image_index); */
-                /* checkHypothesisFitness(mutations,image_index,threshold_mutation, latest_local, tocam_tf); */
-                /* ROS_INFO("[%s]: C:%d Removing unfit mutations...", ros::this_node::getName().c_str(), image_index); */
-                /* removeUnfitHypotheses(mutations); */
-
-
-                /* profiler_main_.indent(); */
-                /* refineHypotheses(separated_points, hypothesis_buffer_.at(index).first, hypothesis_buffer_.at(index).second, image_index, tocam_tf, profiler_main_); */
-                /* profiler_main_.unindent(); */
-
-                double threshold_reproject_unfit = PF_REPROJECT_THRESHOLD_UNFIT(image_index);
-                double threshold_reproject_verified = PF_REPROJECT_THRESHOLD_VERIFIED(image_index);
-
-                profiler_main_.indent();
-                checkHypothesisFitness(ah.second, image_index, threshold_reproject_unfit, threshold_reproject_verified, separated_points, tocam_tf, latest_local.time);
-                removeUnfitHypotheses(ah.second);
-                profiler_main_.unindent();
-                ROS_INFO("[%s]: C:%d, I:%d Curr. hypothesis count: %d", ros::this_node::getName().c_str(), image_index, ah.first, (int)(ah.second.hypotheses.size()));
-                /* ROS_INFO("[%s]: C:%d Removing extras, left: %d", ros::this_node::getName().c_str(), image_index, (int)(hypothesis_buffer_.at(index).hypotheses.size())); */
+                ROS_INFO("[%s]: C:%d, I:%d No hypotheses for target %d", ros::this_node::getName().c_str(), image_index, (int)(latest_local_time.toSec()), pts.ID);
+                continue;
               }
 
-          /* ROS_INFO("[UVDARPoseCalculator]:PF: E"); */
-              removeOldHypotheses(ah.second, latest_local.time);
-          /* ROS_INFO("[UVDARPoseCalculator]:PF: F"); */
+              ROS_INFO("[%s]: C:%d, I:%d Refining. Prev. hypothesis count: %d", ros::this_node::getName().c_str(), image_index, ah->first, (int)(ah->second.hypotheses.size()));
+
+              std::vector<Eigen::Matrix3d> projections;
+              Eigen::Vector3d direction = Eigen::Vector3d::Zero();
+
+              for (auto &p : pts.points)
+              {
+                auto dir = directionFromCamPoint(p.position, image_index);
+                direction += dir;
+                projections.push_back(dir * dir.transpose());
+              }
+
+              direction = direction.normalized();
+              auto avg_projection = direction * direction.transpose();
+
+              // Create projection matrix to project hypothesis onto direction vector
+              auto fromcam_tf = transformer_.inverse(tocam_tf);
+
+              // Project all hypotheses onto the direction vector
+              int projection_index = 0;
+              int projection_count = projections.size();
+              for (auto &h : ah->second.hypotheses)
+              {
+                // h.pose.position = transform(projections[projection_index % projection_count]*transform(h.pose.position, tocam_tf).value(), fromcam_tf).value();
+                h.pose.position = transform(avg_projection*transform(h.pose.position, tocam_tf).value(), fromcam_tf).value();
+                Eigen::Vector3d noise = Eigen::Vector3d::Random();
+
+                // project noise vector to plane perpenduinclar to direction vector
+                noise = noise - direction * direction.dot(noise)/direction.norm();
+                h.pose.position += 0.1*noise;
+                projection_index++;
+              }
+
+              double threshold_reproject_unfit = PF_REPROJECT_THRESHOLD_UNFIT(image_index);
+              double threshold_reproject_verified = PF_REPROJECT_THRESHOLD_VERIFIED(image_index);
+
+              profiler_main_.indent();
+              checkHypothesisFitness(ah->second, image_index, threshold_reproject_unfit, threshold_reproject_verified, pts, tocam_tf, latest_local_time);
+              removeUnfitHypotheses(ah->second);
+              profiler_main_.unindent();
+              ROS_INFO("[%s]: C:%d, I:%d Curr. hypothesis count: %d", ros::this_node::getName().c_str(), image_index, ah->first, (int)(ah->second.hypotheses.size()));
+
+              removeOldHypotheses(ah->second, latest_local_time);
             }
-          }
           }
 
           if (_publish_constituents_){
@@ -1399,7 +1422,7 @@ namespace uvdar {
           return output;
         }
 
-        void checkHypothesisFitness(AssociatedHypotheses &hypotheses, int image_index, double threshold_unfit, double threshold_verified, std::vector<ImageCluster> points, geometry_msgs::TransformStamped tocam_tf, ros::Time time)
+        void checkHypothesisFitness(AssociatedHypotheses &hypotheses, int image_index, double threshold_unfit, double threshold_verified, ImageCluster pts, geometry_msgs::TransformStamped tocam_tf, ros::Time time)
         {
           /* InputData latest_local; */
           /* { */
@@ -1410,48 +1433,45 @@ namespace uvdar {
           /* separated_points = separateBySignals(input_data.points); */
 
           std::vector<ImagePointIdentified> associated_points;
-          /* int i=0; */
-          for (auto &pts : points)
+
+          associated_points = pts.points;
+          int i = 0;
+          for (auto &h : hypotheses.hypotheses)
           {
-            associated_points = pts.points;
-            int i = 0;
-            for (auto &h : hypotheses.hypotheses)
+            if (isInView(h, image_index, tocam_tf))
             {
-              if (isInView(h, image_index, tocam_tf))
+              auto model_curr = model_.rotate(h.pose.orientation).translate(h.pose.position);
+
+              double threshold_scaled_unfit = (int)(associated_points.size()) * threshold_unfit;
+              double threshold_scaled_verified = (int)(associated_points.size()) * threshold_verified;
+              double error_total = totalError(model_curr, associated_points, h.index, image_index, tocam_tf);
+              /* ROS_INFO("[%s]: error: %f vs threshold_scaled: %f", ros::this_node::getName().c_str(), error_total, threshold_scaled); */
+
+              if (error_total > threshold_scaled_unfit)
               {
-                auto model_curr = model_.rotate(h.pose.orientation).translate(h.pose.position);
-
-                double threshold_scaled_unfit = (int)(associated_points.size()) * threshold_unfit;
-                double threshold_scaled_verified = (int)(associated_points.size()) * threshold_verified;
-                double error_total = totalError(model_curr, associated_points, h.index, image_index, tocam_tf);
-                /* ROS_INFO("[%s]: error: %f vs threshold_scaled: %f", ros::this_node::getName().c_str(), error_total, threshold_scaled); */
-
-                if (error_total > threshold_scaled_unfit)
-                {
-                  ROS_INFO_STREAM("[UVDARPoseCalculator]: setting hypo as unfit, err:" << error_total << " vs " << threshold_scaled_unfit);
-                  /* if (h.flag == verified) */
-                  /*   hypotheses.verified_count--; */
-                  /* h.flag = unfit; */
-                  hypotheses.setUnfit(i);
-                  /* h.updated = time; */
-                }
-                else if (error_total < threshold_scaled_verified)
-                {
-                  ROS_INFO_STREAM("[UVDARPoseCalculator]: setting hypo as verified, err:" << error_total << " vs " << threshold_scaled_verified);
-                  /* if (h.flag != verified) */
-                  /*   hypotheses.verified_count++; */
-                  /* h.flag = verified; */
-                  hypotheses.setVerified(i);
-                  /* h.updated = time; */
-                }
-                else
-                {
-                  hypotheses.setNeutral(i);
-                }
-                h.updated = time;
+                ROS_INFO_STREAM("[UVDARPoseCalculator]: setting hypo as unfit, err:" << error_total << " vs " << threshold_scaled_unfit);
+                /* if (h.flag == verified) */
+                /*   hypotheses.verified_count--; */
+                /* h.flag = unfit; */
+                hypotheses.setUnfit(i);
+                /* h.updated = time; */
               }
-              i++;
+              else if (error_total < threshold_scaled_verified)
+              {
+                ROS_INFO_STREAM("[UVDARPoseCalculator]: setting hypo as verified, err:" << error_total << " vs " << threshold_scaled_verified);
+                /* if (h.flag != verified) */
+                /*   hypotheses.verified_count++; */
+                /* h.flag = verified; */
+                hypotheses.setVerified(i);
+                /* h.updated = time; */
+              }
+              else
+              {
+                hypotheses.setNeutral(i);
+              }
+              h.updated = time;
             }
+            i++;
           }
         }
 
