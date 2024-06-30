@@ -13,6 +13,7 @@
 #include <geometry_msgs/PoseWithCovarianceStamped.h>
 #include <geometry_msgs/Vector3Stamped.h>
 #include <mrs_msgs/PoseWithCovarianceArrayStamped.h>
+#include <mrs_msgs/DirectionWithCovarianceArrayStamped.h>
 #include <geometry_msgs/Pose.h>
 #include <mrs_lib/param_loader.h>
 #include <mrs_lib/transformer.h>
@@ -29,6 +30,8 @@
 
 #include "Eigen/src/Core/Matrix.h"
 #include "OCamCalib/ocam_functions.h"
+#include "mrs_msgs/Direction.h"
+#include "mrs_msgs/DirectionWithCovarianceIdentified.h"
 #include <unscented/unscented.h>
 /* #include <p3p/P3p.h> */
 #include <color_selector/color_selector.h>
@@ -682,6 +685,8 @@ namespace uvdar {
         
         pub_measured_poses_ = nh.advertise<mrs_msgs::PoseWithCovarianceArrayStamped>("measuredPoses", 1); 
 
+        pub_directions_ = nh.advertise<mrs_msgs::DirectionWithCovarianceArrayStamped>("measuredDirections", 1);
+
         /* Load calibration files //{ */
         param_loader.loadParam("calib_files", _calib_files_, _calib_files_);
         if (_calib_files_.empty()) {
@@ -772,7 +777,7 @@ namespace uvdar {
         /* initializer_thread_ = std::make_unique<std::thread>(&UVDARPoseCalculator::InitializationThread,this); */
         ros::Rate ir(1);
         initializer_thread_ = std::make_unique<mrs_lib::ThreadTimer>(nh, ir, &UVDARPoseCalculator::InitializationThread, this, false, true);
-        timer_particle_filter_ = nh.createTimer(ros::Rate(10), &UVDARPoseCalculator::ParticleFilterThread, this, false); //Thread that filters and propagates hypotheses from prior estimates
+        // timer_particle_filter_ = nh.createTimer(ros::Rate(10), &UVDARPoseCalculator::ParticleFilterThread, this, false); //Thread that filters and propagates hypotheses from prior estimates
 
         initialized_ = true;
 
@@ -952,8 +957,97 @@ namespace uvdar {
 
         input_data_initialized[image_index] = true;
 
+        mrs_msgs::DirectionWithCovarianceArrayStamped directions;
+        directions.header.stamp = msg->stamp;
+        directions.header.frame_id = _camera_frames_[image_index];
 
+        auto separated_points = separateBySignals(msg->points);
 
+        if(separated_points.empty())
+          return;
+
+        for (auto &pts : separated_points)
+        {
+          if (pts.points.size() < 1)
+            continue;
+
+          // Eigen::MatrixXd directionM = Eigen::MatrixXd::Zero(pts.points.size(), 2);
+
+          // for(std::size_t i = 0; i < pts.points.size(); ++i)
+          // {
+          //   auto &p = pts.points[i];
+          //   auto dir = directionFromCamPoint(p.position, image_index);
+
+          //   // get elevation and azimuth for vector
+          //   double az = atan2(dir.y(), dir.x());
+          //   double el = atan2(dir.head(2).norm(), dir.z());
+
+          //   directionM(i, 0) = az;
+          //   directionM(i, 1) = el;
+          // }
+
+          // Eigen::Matrix2d cov = Eigen::MatrixXd::Identity(2, 2);
+          // Eigen::Vector2d mean = directionM.colwise().mean();
+          // if(directionM.rows() > 1)
+          // {
+          //   Eigen::Matrix2d centered = directionM.rowwise() - directionM.colwise().mean();;
+          //   cov = (centered.adjoint() * centered) / double(directionM.rows() - 1);
+          // }
+
+          // mrs_msgs::DirectionWithCovarianceIdentified dir;
+          // dir.id = pts.ID;
+          // dir.direction.azimuth = mean(0);
+          // dir.direction.elevation = mean(1);
+          // dir.covariance[0] = cov(0, 0);
+          // dir.covariance[1] = cov(0, 1);
+          // dir.covariance[2] = cov(1, 0);
+          // dir.covariance[3] = cov(1, 1);
+
+          // directions.directions.push_back(dir);
+
+          Eigen::MatrixXd directionM = Eigen::MatrixXd::Zero(pts.points.size(), 3);
+
+          for(std::size_t i = 0; i < pts.points.size(); ++i)
+          {
+            auto &p = pts.points[i];
+            auto dir = directionFromCamPoint(p.position, image_index);
+
+            directionM(i, 0) = dir(0);
+            directionM(i, 1) = dir(1);
+            directionM(i, 2) = dir(2);
+          }
+
+          Eigen::Matrix3d cov = 0.1*Eigen::MatrixXd::Identity(3, 3);
+          Eigen::Vector3d mean = directionM.colwise().mean();
+          mean /= mean.norm();
+          if(directionM.rows() > 1)
+          {
+            Eigen::Matrix3d centered = directionM.rowwise() - directionM.colwise().mean();;
+            cov = (centered.adjoint() * centered) / double(directionM.rows() - 1);
+          }
+
+          mrs_msgs::DirectionWithCovarianceIdentified dir;
+          dir.id = pts.ID;
+          dir.direction.x = mean(0);
+          dir.direction.y = mean(1);
+          dir.direction.z = mean(2);
+          dir.covariance[0] = cov(0, 0);
+          dir.covariance[1] = cov(0, 1);
+          dir.covariance[2] = cov(0, 2);
+          dir.covariance[3] = cov(1, 0);
+          dir.covariance[4] = cov(1, 1);
+          dir.covariance[5] = cov(1, 2);
+          dir.covariance[6] = cov(2, 0);
+          dir.covariance[7] = cov(2, 1);
+          dir.covariance[8] = cov(2, 2);
+
+          directions.directions.push_back(dir);
+        }
+
+        if (directions.directions.size() > 0)
+          pub_directions_.publish(directions);
+        
+        return;
       }
       //}
 
@@ -1190,10 +1284,18 @@ namespace uvdar {
 
 
         }
+
+        for (auto &ah: hypothesis_map_)
+        {
+          removeOldHypotheses(ah.second, ros::Time::now());
+        }
         ROS_INFO("[%s]: Hypothesis count: ", ros::this_node::getName().c_str());
         for (auto &hb : hypothesis_map_){
           ROS_INFO("[%s]:     target: %d: %d", ros::this_node::getName().c_str(), hb.first ,(int)(hb.second.hypotheses.size()));
         }
+      
+        publishHypotheses();
+
         batch_processsed_ = true;
 
         /* r.sleep(); */
@@ -1307,7 +1409,7 @@ namespace uvdar {
                 Eigen::Vector3d noise = Eigen::Vector3d::Random();
 
                 // project noise vector to plane perpenduinclar to direction vector
-                noise = noise - direction * direction.dot(noise)/direction.norm();
+                noise = noise - direction * direction.dot(noise);
                 h.pose.position += 0.1*noise;
                 projection_index++;
               }
@@ -1325,14 +1427,35 @@ namespace uvdar {
             }
           }
 
-          if (_publish_constituents_){
+          publishHypotheses();
+
+          if (_profiling_){
+            profiler_main_.printAll("[UVDARPoseCalculator]: [PF]:");
+          }
+          profiler_main_.clear();
+        }
+        //}
+
+        void publishDirections([[maybe_unused]] const ros::TimerEvent& te) {
+          if (!ros::ok() || !initialized_)    
+            return;
+          
+          for (unsigned int image_index = 0; image_index < _camera_count_; image_index++)
+          {
+            
+          }
+        }
+
+        void publishHypotheses() {
+          if (_publish_constituents_) {
 
             mrs_msgs::PoseWithCovarianceArrayStamped msg_constuents_array;
-            msg_constuents_array.header.frame_id = _uav_name_+"/"+_output_frame_;
+            msg_constuents_array.header.frame_id =
+                _uav_name_ + "/" + _output_frame_;
             msg_constuents_array.header.stamp = latest_input_data_[0].time;
 
-            for (auto &ah : hypothesis_map_){
-              for (auto &h : ah.second.hypotheses){
+            for (auto &ah : hypothesis_map_) {
+              for (auto &h : ah.second.hypotheses) {
 
                 mrs_msgs::PoseWithCovarianceIdentified constituent;
                 constituent.id = ah.first;
@@ -1344,10 +1467,10 @@ namespace uvdar {
                 constituent.pose.orientation.z = h.pose.orientation.z();
                 constituent.pose.orientation.w = h.pose.orientation.w();
 
-                e::MatrixXd hypo_covar = e::MatrixXd::Identity(6,6)*0.01;
-                for (int i=0; i<6; i++){
-                  for (int j=0; j<6; j++){
-                    constituent.covariance[6*j+i] =  hypo_covar(j,i);
+                e::MatrixXd hypo_covar = e::MatrixXd::Identity(6, 6) * 0.01;
+                for (int i = 0; i < 6; i++) {
+                  for (int j = 0; j < 6; j++) {
+                    constituent.covariance[6 * j + i] = hypo_covar(j, i);
                   }
                 }
                 msg_constuents_array.poses.push_back(constituent);
@@ -1358,12 +1481,12 @@ namespace uvdar {
           }
 
           mrs_msgs::PoseWithCovarianceArrayStamped msg_output;
-          msg_output.header.frame_id = _uav_name_+"/"+_output_frame_;
+          msg_output.header.frame_id = _uav_name_ + "/" + _output_frame_;
           msg_output.header.stamp = latest_input_data_[0].time;
-          for (auto &ah : hypothesis_map_){
+          for (auto &ah : hypothesis_map_) {
             mrs_msgs::PoseWithCovarianceIdentified msg_target;
             auto res = getMeasurementElipsoidHull(ah.second);
-            if (res){
+            if (res) {
               auto [m, C] = res.value();
               msg_target.id = ah.first;
               msg_target.pose.position.x = m.position.x();
@@ -1374,9 +1497,9 @@ namespace uvdar {
               msg_target.pose.orientation.z = m.orientation.z();
               msg_target.pose.orientation.w = m.orientation.w();
 
-              for (int i=0; i<6; i++){
-                for (int j=0; j<6; j++){
-                  msg_target.covariance[6*j+i] =  C(j,i);
+              for (int i = 0; i < 6; i++) {
+                for (int j = 0; j < 6; j++) {
+                  msg_target.covariance[6 * j + i] = C(j, i);
                 }
               }
               msg_output.poses.push_back(msg_target);
@@ -1384,15 +1507,9 @@ namespace uvdar {
           }
           pub_measured_poses_.publish(msg_output);
 
-          if (_profiling_){
-            profiler_main_.printAll("[UVDARPoseCalculator]: [PF]:");
-          }
-          profiler_main_.clear();
+          return;
         }
-        //}
-       
-        
-        
+
         void HypothesesToGlobal(std::vector<Hypothesis> &input, int image_index, ros::Time time){
           std::optional<geometry_msgs::TransformStamped> tf;
           {

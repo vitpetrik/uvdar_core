@@ -262,6 +262,7 @@
 
       <remap from="~constituentHypotheses" to="/$(arg uav_name)/uvdar/constituentHypotheses"/>
       <remap from="~measuredPoses" to="/$(arg uav_name)/uvdar/measuredPoses"/>
+      <remap from="~measuredDirections" to="/$(arg uav_name)/uvdar/measuredDirections"/>
 
       <!-- <remap from="~constituentPoses1" to="/$(arg uav_name)/uvdar/constituentPosesL"/> -->
       <!-- <remap from="~constituentPoses2" to="/$(arg uav_name)/uvdar/constituentPosesR"/> -->
