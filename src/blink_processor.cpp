@@ -195,7 +195,6 @@ namespace uvdar{
       // params for AMI
       cv::Point _max_px_shift_;
       int _max_zeros_consecutive_;
-      int _max_ones_consecutive_;
       int _stored_seq_len_factor_;
       int _max_buffer_length_;
       int _poly_order_;
@@ -217,6 +216,7 @@ namespace uvdar{
 
       // for extracting the received sequences from the AMI/4DHT
       struct BlinkData{
+        bool valid = false;
         ros::Time                     last_sample_time;
         ros::Time                     last_sample_time_diagnostic;
         unsigned int                  sample_count = -1;
@@ -311,11 +311,10 @@ namespace uvdar{
     /***** AMI params *****/
     param_loader.loadParam("max_px_shift_x", _max_px_shift_.x, int(2));
     param_loader.loadParam("max_px_shift_y", _max_px_shift_.y, int(2));
-    param_loader.loadParam("max_zeros_consecutive", _max_zeros_consecutive_, int(2));
-    param_loader.loadParam("max_ones_consecutive", _max_ones_consecutive_, int(2));
-    param_loader.loadParam("stored_seq_len_factor", _stored_seq_len_factor_, int(15));
+    param_loader.loadParam("max_zeros_consecutive", _max_zeros_consecutive_, int(10));
+    param_loader.loadParam("stored_seq_len_factor", _stored_seq_len_factor_, int(20));
     param_loader.loadParam("max_buffer_length", _max_buffer_length_, int(1000));
-    param_loader.loadParam("poly_order", _poly_order_, int(2));
+    param_loader.loadParam("poly_order", _poly_order_, int(4));
     param_loader.loadParam("decay_factor", _decay_factor_, float(0.1));
     param_loader.loadParam("confidence_probability", _conf_probab_percent_, double(75.0));
     param_loader.loadParam("allowed_BER_per_seq", _allowed_BER_per_seq_, int(0));
@@ -435,7 +434,6 @@ namespace uvdar{
     loadedParamsForAMI params_AMI;
     params_AMI.max_px_shift = _max_px_shift_;
     params_AMI.max_zeros_consecutive = _max_zeros_consecutive_;
-    params_AMI.max_ones_consecutive = _max_ones_consecutive_;
     params_AMI.stored_seq_len_factor = _stored_seq_len_factor_;
     params_AMI.max_buffer_length = _max_buffer_length_;
     params_AMI.poly_order = _poly_order_;
@@ -460,7 +458,7 @@ namespace uvdar{
     for (size_t i = 0; i < _points_seen_topics_.size(); ++i) {
       ht4dbt_trackers_.push_back(
         std::make_shared<HT4DBlinkerTrackerCPU>(
-            _accumulator_length_, _pitch_steps_, _yaw_steps_, _max_pixel_shift_, cv::Size(0, 0), _nullify_radius_, _reasonable_radius_
+            _accumulator_length_, _pitch_steps_, _yaw_steps_, _max_pixel_shift_, cv::Size(0, 0), _allowed_BER_per_seq_,  _nullify_radius_, _reasonable_radius_
           )
         );
       ht4dbt_trackers_.back()->setDebug(_debug_, _visual_debug_);
@@ -576,6 +574,7 @@ namespace uvdar{
 
     }
     blink_data_[img_index].last_sample_time = pts_msg->stamp;
+    blink_data_[img_index].valid = true;
 
     if (_debug_) {
       ROS_INFO_STREAM("[UVDARBlinkProcessor]: Received contours: " << pts_msg->points.size());
@@ -705,7 +704,6 @@ namespace uvdar{
           ami_logging_msg.max_buffer_length = _max_buffer_length_;
           ami_logging_msg.default_poly_order = _poly_order_;
           ami_logging_msg.max_zeros_consecutive = _max_zeros_consecutive_;
-          ami_logging_msg.max_ones_consecutive = _max_ones_consecutive_;
           max_px_shift.x = _max_px_shift_.x;
           max_px_shift.y = _max_px_shift_.y;
           ami_logging_msg.confidence_probab_t_dist = _conf_probab_percent_;
@@ -740,6 +738,11 @@ namespace uvdar{
     }
 
     if(_use_4DHT_){
+
+      if (!(blink_data_[image_index].valid)){
+        return;
+      }
+
       uvdar_core::ImagePointsWithFloatStamped msg;
 
       if (_debug_){
